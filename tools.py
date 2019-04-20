@@ -3,6 +3,7 @@ import pandas as pd
 from scipy.io import loadmat
 import glob
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # Constants
 
@@ -40,7 +41,7 @@ MAG_CHANNELS = [ 14,  17,  20,  23,  29,  32,  38,  41,  44,  47,  56,  59,  62,
        182, 185, 200, 203, 206, 209, 212, 221, 224, 227, 230, 233, 248,
        251, 254, 257, 260, 263, 272, 275, 278, 281]
 
-GRA1_CHANNELS = [ 12,  15,  18,  21,  27,  30,  36,  39,  42,  45,  54,  57,  60,
+GRAD1_CHANNELS = [ 12,  15,  18,  21,  27,  30,  36,  39,  42,  45,  54,  57,  60,
         63,  66,  69,  72,  75,  78,  81,  87,  96,  99, 102, 105, 108,
        111, 114, 117, 120, 123, 132, 135, 138, 141, 144, 147, 174, 177,
        180, 183, 198, 201, 204, 207, 210, 219, 222, 225, 228, 231, 246,
@@ -52,23 +53,75 @@ GRAD2_CHANNELS = [ 13,  16,  19,  22,  28,  31,  37,  40,  43,  46,  55,  58,  6
        181, 184, 199, 202, 205, 208, 211, 220, 223, 226, 229, 232, 247,
        250, 253, 256, 259, 262, 271, 274, 277, 280]
 
+# Feature generation
+
+def make_features(files, start, end):
+	temp = []
+	labels = []
+
+	n_trials = 0
+	for file in files:
+	    print('processing: ' + file)
+	    print('n_trial: ' + str(n_trials))
+	    data, btn, auto, tAx, SR = load(files[0])
+	    mask = (tAx>=start) & (tAx<=end)
+	    
+	    ch_types = [MAG_CHANNELS, GRAD1_CHANNELS, GRAD2_CHANNELS]
+	    
+	    all_ch_images = []
+	    
+	    for ch_type in ch_types:
+	        selected_data = data[ch_type, :, :]
+	        
+	        selected_data_normalized = (selected_data - np.mean(selected_data))/np.std(selected_data)
+	        
+	        session_trials = selected_data.shape[2]
+	        
+	        ch_imgs = []
+	        
+	        for i in range(session_trials):
+	            imgs = freq_img(selected_data_normalized[:, :, i], window_mask=mask[0], 
+	                              SR=SR, tAx=tAx, plot=False)
+	            ch_imgs.append(imgs)
+	    
+	        
+	        all_ch_images.append(ch_imgs)
+	    
+	    for i in range(len(all_ch_images[0])):
+	        imgs = np.dstack([all_ch_images[0][i], all_ch_images[1][i], all_ch_images[2][i]])
+	        temp.append(imgs)
+	        n_trials+=1
+	    labels = labels + list(btn.reshape(-1))
+
+	return np.array(temp), np.array(labels)
+
+
 # Single trial draw the frequency
 
-def freq_bands_power(signal):
+def freq_bands_power(signal, SR, tAx):
 
-	current_signal_fft = abs(np.fft.fft(signal, n=500))
-	f = np.fft.fftfreq(500, d=1/500)
+	n = signal.shape[0]
+	current_signal_fft = abs(np.fft.fft(signal)/n)**2
+	Fs = SR
+	Ts = 1.0/Fs
+	t = tAx
+	k = np.arange(n)
+	T = n/Fs
+	f = k/T
+	inds = int(n/2)
+	f = f[:,range(inds)].reshape(-1)
+	one_side = current_signal_fft[range(inds)]
 
-	delta = sum(current_signal_fft[0:4])
-	theta = sum(current_signal_fft[4:8])
-	alpha = sum(current_signal_fft[8:14])
-	beta = sum(current_signal_fft[15:31])
-	low_gamma = sum(current_signal_fft[30:61])
-	high_gamma = sum(current_signal_fft[61:101])
+	delta = sum(one_side[(f>0)&(f<=3)])
+	theta = sum(one_side[(f>3)&(f<=7)])
+	alpha = sum(one_side[(f>7)&(f<=13)])
+	beta = sum(one_side[(f>15)&(f<=30)])
+	low_gamma = sum(one_side[(f>30)&(f<=60)])
+	high_gamma = sum(one_side[(f>60)&(f<=100)])
 
 	return delta, theta, alpha, beta, low_gamma, high_gamma
 
-def freq_img(trial, window_mask, plot = True, figsize=(10, 14)):
+def freq_img(trial, window_mask, SR, tAx, plot = True, figsize=(14, 20)):
 
 	delta_all_chs = []
 	theta_all_chs = []
@@ -79,7 +132,7 @@ def freq_img(trial, window_mask, plot = True, figsize=(10, 14)):
 
 	for i in range(len(trial)):
 		signal = trial[i, window_mask]
-		delta, theta, alpha, beta, low_gamma, high_gamma = freq_bands_power(signal)
+		delta, theta, alpha, beta, low_gamma, high_gamma = freq_bands_power(signal, SR, tAx)
 		delta_all_chs.append(delta)
 		theta_all_chs.append(theta)
 		alpha_all_chs.append(alpha)
@@ -104,7 +157,7 @@ def freq_img(trial, window_mask, plot = True, figsize=(10, 14)):
 
 		imgs.append(img)
 
-	imgs = np.stack(imgs)
+	imgs = np.stack(imgs, axis=2)
 
 	if plot == True:
 		fig, ax = plt.subplots(nrows=3, ncols=2, figsize=figsize)
@@ -119,22 +172,29 @@ def freq_img(trial, window_mask, plot = True, figsize=(10, 14)):
 			if (col_ind == 2):
 				col_ind = col_ind - 2
 				row_ind = row_ind + 1
+		plt.tight_layout()
 
 	return imgs
 
-def plot_freq_bands(imgs, figsize=(10, 14)):
-	chs_names = ['delta', 'theta', 'alpha', 'beta', 'low_gamma', 'high_gamma']
-	fig, ax = plt.subplots(nrows=3, ncols=2, figsize=figsize)
+def plot_freq_bands(imgs, figsize=(8, 20)):
+	chs_names = ['mag_delta', 'mag_theta', 'mag_alpha', 'mag_beta', 'mag_low_gamma', 'high_gamma',
+				'grad1_delta', 'grad1_theta', 'grad1_alpha', 'grad1_beta', 'grad1_low_gamma', 'grad1_high_gamma',
+				'grad2_delta', 'grad2_theta', 'grad2_alpha', 'grad2_beta', 'grad2_low_gamma', 'grad2_high_gamma']
+	fig, ax = plt.subplots(nrows=9, ncols=2, figsize=figsize)
 	row_ind = 0
 	col_ind = 0
 
-	for i in range(len(imgs)):
-		ax[row_ind, col_ind].imshow(imgs[i])
+	for i in range(imgs.shape[2]):
+		ax[row_ind, col_ind].imshow(imgs[:,:,i])
 		ax[row_ind, col_ind].set_title(chs_names[i])
 		col_ind = col_ind + 1
 		if (col_ind == 2):
 			col_ind = col_ind - 2
 			row_ind = row_ind + 1
+	plt.tight_layout()
+
+	return fig
+
 # Some util
 
 def load(filename):
